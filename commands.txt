@@ -1,0 +1,2 @@
+python in9_eval.py --eval-dataset mixed_same --checkpoint models\in9l_resnet50.pt --data-path data\ --in9
+

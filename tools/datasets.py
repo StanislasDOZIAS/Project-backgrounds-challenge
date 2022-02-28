@@ -6,12 +6,15 @@ from tools import folder
 from torch.utils.data import DataLoader
 
 
-def make_loaders(workers, batch_size, transforms, data_path, dataset, shuffle_val=False):
+def make_loaders(workers, batch_size, transforms, data_path, dataset, shuffle_val=False, test = True):
     '''
     '''
     print(f"==> Preparing dataset {dataset}..")
 
-    test_path = os.path.join(data_path, 'val')
+    if test :
+        test_path = os.path.join(data_path, 'val')
+    else :
+        test_path = os.path.join(data_path, 'train')
     if not os.path.exists(test_path):
         raise ValueError("Test data must be stored in {0}".format(test_path))
 
@@ -35,7 +38,7 @@ class DataSet(object):
         self.data_path = data_path
         self.__dict__.update(kwargs)
 
-    def make_loaders(self, workers, batch_size, shuffle_val=False):
+    def make_loaders(self, workers, batch_size, shuffle_val=False, test = True):
         '''
         '''
         transforms = self.transform_test
@@ -44,7 +47,8 @@ class DataSet(object):
                                 transforms=transforms,
                                 data_path=self.data_path,
                                 dataset=self.ds_name,
-                                shuffle_val=shuffle_val)
+                                shuffle_val=shuffle_val,
+                                test = True)
     
     def get_model(self, arch, pretrained):
         '''

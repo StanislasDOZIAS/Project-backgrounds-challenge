@@ -29,7 +29,7 @@ def main(args):
         map_to_in9.update(json.load(f))
 
     BASE_PATH_TO_EVAL = args.data_path
-    BATCH_SIZE = 32
+    BATCH_SIZE = 16
     WORKERS = 8
     
     # Load eval dataset
@@ -49,6 +49,9 @@ def main(args):
         model, _ = make_and_restore_model(arch=arch, dataset=train_ds,
                      pytorch_pretrained=True)
     else:
+        print("coucou")
+        print(arch)
+        print(checkpoint)
         model, _ = make_and_restore_model(arch=arch, dataset=train_ds,
                      resume_path=checkpoint)
     model.cuda()
