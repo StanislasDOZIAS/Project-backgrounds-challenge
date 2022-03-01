@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 def make_loaders(workers, batch_size, transforms, data_path, dataset, shuffle_val=False, test = True):
     '''
     '''
-    print(f"==> Preparing dataset {dataset}..")
+    #print(f"==> Preparing dataset {dataset}..")
 
     if test :
         test_path = os.path.join(data_path, 'val')
