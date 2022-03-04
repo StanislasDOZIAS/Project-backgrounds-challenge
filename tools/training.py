@@ -88,6 +88,20 @@ def make_epoch(train_loader, cuda, optimizer, net, criterion, loss_train, acc_tr
     print('[%d] test acc: %.3f' %(epoch + 1, test_acc))
     print("####################")
 
+def make_epoch_no_back(train_loader, cuda, optimizer, net, criterion, loss_train, acc_train, test_loader, loss_test, acc_test, epoch, test_acc_period, _print) :
+  for data in train_loader:
+    # get the inputs
+    inputs, labels = data
+    if cuda:
+      inputs = inputs.type(torch.cuda.FloatTensor)
+      labels = labels.type(torch.cuda.LongTensor)
+    # print(inputs.shape)
+
+    # zero the parameter gradients
+    optimizer.zero_grad()
+
+    outputs = net(inputs)
+
 
 def train(net, temp_net, train_loader, test_loader,  n_epoch_first_train, n_cycle, n_epoch_cycle , test_acc_period = 5, cuda=True, criterion = nn.CrossEntropyLoss(), _print = True, initial_lr = 1e-4):
   loss_train = []
@@ -115,17 +129,18 @@ def train(net, temp_net, train_loader, test_loader,  n_epoch_first_train, n_cycl
   lr_curve.append(learning_rate)
 
   # First training (lr cst)
-  for epoch in tqdm.tqdm_notebook(range(n_epoch_first_train)):
-    optimizer = torch.optim.Adam(net.parameters(),lr=learning_rate)
-    make_epoch(train_loader, cuda, optimizer, net, criterion, loss_train, acc_train, test_loader, loss_test, acc_test, epoch, test_acc_period, _print)
-    lr_curve.append(learning_rate)
+  if n_epoch_first_train > 0 :
+    for epoch in tqdm.tqdm_notebook(range(n_epoch_first_train)):
+      optimizer = torch.optim.Adam(net.parameters(),lr=learning_rate)
+      make_epoch(train_loader, cuda, optimizer, net, criterion, loss_train, acc_train, test_loader, loss_test, acc_test, epoch, test_acc_period, _print)
+      lr_curve.append(learning_rate)
 
-  # Second training (lr decr)
-  for epoch in tqdm.tqdm_notebook(range(n_epoch_first_train)):
-    optimizer = torch.optim.Adam(net.parameters(),lr=learning_rate)
-    make_epoch(train_loader, cuda, optimizer, net, criterion, loss_train, acc_train, test_loader, loss_test, acc_test, epoch, test_acc_period, _print)
-    learning_rate *= 0.9
-    lr_curve.append(learning_rate)
+    # Second training (lr decr)
+    for epoch in tqdm.tqdm_notebook(range(n_epoch_first_train)):
+      optimizer = torch.optim.Adam(net.parameters(),lr=learning_rate)
+      make_epoch(train_loader, cuda, optimizer, net, criterion, loss_train, acc_train, test_loader, loss_test, acc_test, epoch, test_acc_period, _print)
+      learning_rate *= 0.9
+      lr_curve.append(learning_rate)
 
   for name, param in temp_net.named_parameters():
       param.data = net.get_parameter(name)
@@ -142,9 +157,8 @@ def train(net, temp_net, train_loader, test_loader,  n_epoch_first_train, n_cycl
       param.data = (cycle+1)/(cycle+2) * temp_net.get_parameter(name) + 1/(cycle+2) * net.get_parameter(name)
 
   # Last forward for BatchNorm on temp_net
-  for epoch in tqdm.tqdm_notebook(range(n_epoch_cycle)):
-      optimizer = torch.optim.Adam(temp_net.parameters(),lr=0)
-      make_epoch(train_loader, cuda, optimizer, temp_net, criterion, [], [], test_loader, [], [], epoch, test_acc_period, _print)
+    optimizer = torch.optim.Adam(temp_net.parameters(),lr=0)
+    make_epoch_no_back(train_loader, cuda, optimizer, temp_net, criterion, [], [], test_loader, [], [], epoch, test_acc_period, _print)
 
   print('Finished Training')
   return loss_train, loss_test, acc_train, acc_test, lr_curve
