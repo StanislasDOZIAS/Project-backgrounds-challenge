@@ -1,17 +1,11 @@
 import sys  
 sys.path.insert(0, '../')
-from torchvision import transforms
 import torch
 import torch.nn as nn
 import numpy as np
-import json
-import os
-import time
-from argparse import ArgumentParser
-from tools.datasets import ImageNet, ImageNet9
-from tools.model_utils import make_and_restore_model, eval_model
-from tools.folder import pil_loader
-from PIL import Image
+
+from tools.datasets import ImageNet9
+
 import tqdm
 from matplotlib import pyplot as plt
 
@@ -31,26 +25,21 @@ def l_2_onehot(labels,nb_digits=n_classes):
 
     return label_onehot
 
+def polyak_update(polyak_factor, target_network, network):
+    params1 = network.state_dict()
+    params2 = target_network.state_dict()
 
+    states = params2.copy()
 
+    for name in states:
+        states[name].data.copy_(polyak_factor*params1[name] + (1-polyak_factor)*params2[name].data)
+    
+    target_network.load_state_dict(states)
 
-def initialize_weights(net):
-    for m in net.modules():
-        if isinstance(m, nn.Conv2d):
-            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.Linear):
-            nn.init.normal_(m.weight, 0, 0.01)
-            nn.init.constant_(m.bias, 0)
-
-
-
-def accuracy(net, test_loader, cuda=True, criterion = nn.CrossEntropyLoss()):
+def accuracy(net, test_loader, cuda=True):
   net.eval()
   correct = 0
   total = 0
-  loss = 0
   with torch.no_grad():
       for data in test_loader:
           images, labels = data
@@ -59,120 +48,150 @@ def accuracy(net, test_loader, cuda=True, criterion = nn.CrossEntropyLoss()):
             labels = labels.type(torch.cuda.LongTensor)
           outputs = net(images)
           
-          loss += criterion(outputs, labels)
           _, predicted = torch.max(outputs.data, 1)
           total += labels.size(0)
           correct += (predicted == labels).sum().item()
 
   net.train()
+  return 100.0 * correct/ total
 
-  return 100.0 * correct/ total, loss.item()
+def make_epoch(train_loader, cuda, optimizer, net, criterion) :
+  for data in train_loader:
+    # get the inputs
+    inputs, labels = data
+    if cuda:
+      inputs = inputs.type(torch.cuda.FloatTensor)
+      labels = labels.type(torch.cuda.LongTensor)
+    # print(inputs.shape)
+
+    # zero the parameter gradients
+    optimizer.zero_grad()
+
+    outputs = net(inputs)
+
+    loss = criterion(outputs, labels)
+    loss.backward()
+    optimizer.step()
 
 
-def train(net, optimizer, train_loader, test_loader, loss,  n_epoch = 5, test_acc_period = 5, cuda=True, criterion = nn.CrossEntropyLoss(), _print = True):
+def make_epoch_no_back(train_loader, cuda, optimizer, net) :
+  for data in train_loader:
+    # get the inputs
+    inputs, labels = data
+    if cuda:
+      inputs = inputs.type(torch.cuda.FloatTensor)
+      labels = labels.type(torch.cuda.LongTensor)
+    # print(inputs.shape)
 
-  initialize_weights(net)
+    # zero the parameter gradients
+    optimizer.zero_grad()
+    outputs = net(inputs)
 
-  loss_train = []
-  loss_test = []
-  acc_train = []
-  acc_test = []
 
-  train_acc, train_loss = accuracy(net, train_loader, cuda=cuda, criterion = criterion)
-  loss_train.append(train_loss)
-  acc_train.append(train_acc)
+def train(net, temp_net, train_loader, original_val, mixed_same_val, mixed_rand_val, n_epoch_first_train, n_cycle, n_epoch_cycle , test_acc_period = 5, cuda=True, criterion = nn.CrossEntropyLoss(), _print = True, initial_lr = 1e-4):
+  original_acc = []
+  mixed_same_acc = []
+  mixed_rand_acc = []
+  learning_rate = initial_lr
 
-  test_acc, test_loss = accuracy(net, test_loader, cuda=cuda, criterion = criterion)
-  loss_test.append(test_loss)
-  acc_test.append(test_acc)
-  if _print :
-    print('[%d] train loss: %.3f' %(0, train_loss))
-    print('[%d] train acc: %.3f' %(0, train_acc))
-    print()
-    print('[%d] test loss: %.3f' %(0, test_loss))
-    print('[%d] test acc: %.3f' %(0, test_acc))
-    print("####################")
+  # First training (lr cst)
+  if n_epoch_first_train > 0 :
+    for epoch in tqdm.tqdm_notebook(range(n_epoch_first_train)):
+      optimizer = torch.optim.Adam(net.parameters(),lr=learning_rate)
+      make_epoch(train_loader, cuda, optimizer, net, criterion)
 
-  for epoch in tqdm.tqdm_notebook(range(n_epoch)):  # loop over the dataset multiple times
+    # Second training (lr decr)
+    for epoch in tqdm.tqdm_notebook(range(n_epoch_first_train)):
+      optimizer = torch.optim.Adam(net.parameters(),lr=learning_rate)
+      make_epoch(train_loader, cuda, optimizer, net, criterion)
+      learning_rate *= 0.9
 
-    for data in train_loader:
-      # get the inputs
-      inputs, labels = data
-      if cuda:
-        inputs = inputs.type(torch.cuda.FloatTensor)
-        labels = labels.type(torch.cuda.LongTensor)
-      # print(inputs.shape)
+  polyak_update(1, temp_net, net)
 
-      # zero the parameter gradients
-      optimizer.zero_grad()
+  original_acc.append(accuracy(temp_net, original_val, cuda=cuda))
+  mixed_same_acc.append(accuracy(temp_net, mixed_same_val, cuda=cuda))
+  mixed_rand_acc.append(accuracy(temp_net, mixed_rand_val, cuda=cuda))
 
-      outputs = net(inputs)
+  # Third training (lr cycle)
+  for cycle in tqdm.tqdm_notebook(range(n_cycle)) :
+    learning_rate /= np.power(0.9,n_epoch_cycle)
 
-      loss = criterion(outputs, labels)
-      loss.backward()
-      optimizer.step()
+    for epoch in range(n_epoch_cycle):
+      optimizer = torch.optim.Adam(net.parameters(),lr=learning_rate)
+      make_epoch(train_loader, cuda, optimizer, net, criterion)
+      learning_rate *= 0.9
 
-    train_acc, train_loss = accuracy(net, train_loader, cuda=cuda, criterion = criterion)
-    loss_train.append(train_loss)
-    acc_train.append(train_acc)
+    polyak_update(1/(cycle+2), temp_net, net)
 
-    test_acc, test_loss = accuracy(net, test_loader, cuda=cuda, criterion = criterion)
-    loss_test.append(test_loss)
-    acc_test.append(test_acc)
-    
-    if ((epoch+1) % test_acc_period == 0) and _print:
-      print('[%d] train loss: %.3f' %(epoch + 1, train_loss))
-      print('[%d] train acc: %.3f' %(epoch + 1, train_acc))
-      print()
-      print('[%d] test loss: %.3f' %(epoch + 1, test_loss))
-      print('[%d] test acc: %.3f' %(epoch + 1, test_acc))
-      print("####################")
-    
+    original_acc.append(accuracy(temp_net, original_val, cuda=cuda))
+    mixed_same_acc.append(accuracy(temp_net, mixed_same_val, cuda=cuda))
+    mixed_rand_acc.append(accuracy(temp_net, mixed_rand_val, cuda=cuda))
+
+
+  # Last forward for BatchNorm on temp_net
+    optimizer = torch.optim.Adam(temp_net.parameters(),lr=0)
+    make_epoch_no_back(train_loader, cuda, optimizer, temp_net)
+
   print('Finished Training')
-  return loss_train, loss_test, acc_train, acc_test
-
-def make_training(variation, net, nb_epoch = 30, batch_size = 16, workers = 0, criterion = nn.CrossEntropyLoss(), test_acc_period = 5, _print = True) :
-
-    dataset = ImageNet9("../data/"+variation)
-    val_loader = dataset.make_loaders(batch_size=batch_size, workers=workers)
-    train_loader = dataset.make_loaders(batch_size=batch_size, workers=workers, shuffle_val=True, test = False)
+  return original_acc, mixed_same_acc, mixed_rand_acc
 
 
-    use_cuda = True
-    if use_cuda and torch.cuda.is_available():
-        print("using cuda")
-        net.cuda()
-    learning_rate = 1e-4
-    optimizer = torch.optim.Adam(net.parameters(),lr=learning_rate)
-    loss_train, loss_test, acc_train, acc_test = train(net,
-                                                      optimizer,
-                                                      train_loader,
-                                                      val_loader,
-                                                      criterion,
-                                                      n_epoch = nb_epoch,
-                                                      test_acc_period = test_acc_period,
-                                                      criterion = nn.CrossEntropyLoss(),
-                                                      _print = _print)
 
-    acc, loss = accuracy(net, val_loader, cuda=use_cuda, criterion = nn.CrossEntropyLoss())
 
-    print("Final acc : ", acc)
-    print()
-    print("Accuracy Graph")
-    plt.plot(range(len(acc_train)), acc_train, label = "train")
-    plt.plot(range(len(acc_test)), acc_test, label = "test")
-    plt.legend()
-    plt.show()
 
-    print()
-    print("Loss Graph")
-    plt.plot(range(len(loss_train)), loss_train, label = "train")
-    plt.plot(range(len(loss_test)), loss_test, label = "test")
-    plt.legend()
-    plt.show()
+def make_training(net, temp_net, n_epoch_first_train, n_cycle, n_epoch_cycle, batch_size = 16, workers = 0, criterion = nn.CrossEntropyLoss(), test_acc_period = 5, _print = True, initial_lr = 1e-4) :
+  original_dataset = ImageNet9("../data/original")
+  original_train = original_dataset.make_loaders(batch_size=batch_size, workers=workers, shuffle_val=True, test = False)
+  original_val = original_dataset.make_loaders(batch_size=batch_size, workers=workers)
+
+  mixed_same_dataset = ImageNet9("../data/mixed_same")
+  mixed_same_val = mixed_same_dataset.make_loaders(batch_size=batch_size, workers=workers)
+
+  mixed_rand_dataset = ImageNet9("../data/mixed_rand")
+  mixed_rand_val = mixed_rand_dataset.make_loaders(batch_size=batch_size, workers=workers)
+
+  use_cuda = True
+  if use_cuda and torch.cuda.is_available():
+      print("using cuda")
+      net.cuda()
+      temp_net.cuda()
+
+  original_acc, mixed_same_acc, mixed_rand_acc =  train(net = net, 
+                                                        temp_net = temp_net,
+                                                        train_loader = original_train,
+                                                        original_val = original_val,
+                                                        mixed_same_val = mixed_same_val,
+                                                        mixed_rand_val = mixed_rand_val,
+                                                        n_epoch_first_train = n_epoch_first_train,
+                                                        n_cycle = n_cycle,
+                                                        n_epoch_cycle = n_epoch_cycle,
+                                                        test_acc_period = test_acc_period,
+                                                        criterion = criterion,
+                                                        _print = _print,
+                                                        initial_lr = initial_lr
+                                                        )
+                                                    
+ 
+
+
+  print("Final original acc : ", accuracy(net, original_val, cuda=use_cuda))
+  print("Final mixed_same acc : ", accuracy(net, mixed_same_val, cuda=use_cuda))
+  print("Final mixed_rand acc : ", accuracy(net, mixed_rand_val, cuda=use_cuda))
+
+  print()
+  print("Accuracy Graph with ", n_epoch_cycle, " epoch per cycle" )
+  plt.plot(range(len(original_acc)), original_acc, label = "original")
+  plt.plot(range(len(mixed_same_acc)), mixed_same_acc, label = "mixed_same")
+  plt.plot(range(len(mixed_rand_acc)), mixed_rand_acc, label = "mixed_rand")
+  plt.legend()
+  plt.show()
+
+  return original_acc, mixed_same_acc, mixed_rand_acc
+
+
+
 
 def test_on_dataset(variation, net, batch_size = 16, workers = 0) : 
     dataset = ImageNet9("../data/"+variation)
     val_loader = dataset.make_loaders(batch_size=batch_size, workers=workers)
-    acc, loss = accuracy(net, val_loader, cuda=True)
-    return acc
+    return accuracy(net, val_loader, cuda=True)
