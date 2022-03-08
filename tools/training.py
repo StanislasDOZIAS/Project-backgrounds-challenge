@@ -3,22 +3,14 @@ sys.path.insert(0, '../')
 import torch
 import torch.nn as nn
 import numpy as np
-
 from tools.datasets import ImageNet9
-
 import tqdm
 from matplotlib import pyplot as plt
-
-
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 n_classes = 9
 def l_2_onehot(labels,nb_digits=n_classes):
     # take labels (from the dataloader) and return labels onehot-encoded
-    #
-    # your code here
-    #
     label_onehot = torch.FloatTensor(labels.shape[0], nb_digits)
     label_onehot.zero_()
     label_onehot = label_onehot.scatter_(1,labels.unsqueeze(1),1).cpu()
@@ -57,35 +49,25 @@ def accuracy(net, test_loader, cuda=True):
 
 def make_epoch(train_loader, cuda, optimizer, net, criterion) :
   for data in train_loader:
-    # get the inputs
     inputs, labels = data
     if cuda:
       inputs = inputs.type(torch.cuda.FloatTensor)
       labels = labels.type(torch.cuda.LongTensor)
-    # print(inputs.shape)
 
-    # zero the parameter gradients
     optimizer.zero_grad()
-
     outputs = net(inputs)
-
     loss = criterion(outputs, labels)
     loss.backward()
     optimizer.step()
 
 
-def make_epoch_no_back(train_loader, cuda, optimizer, net) :
+def make_epoch_no_back(train_loader, cuda, net) :
   for data in train_loader:
-    # get the inputs
     inputs, labels = data
     if cuda:
       inputs = inputs.type(torch.cuda.FloatTensor)
       labels = labels.type(torch.cuda.LongTensor)
-    # print(inputs.shape)
-
-    # zero the parameter gradients
-    optimizer.zero_grad()
-    outputs = net(inputs)
+    net(inputs)
 
 
 def train(net, temp_net, train_loader, original_val, mixed_same_val, mixed_rand_val, n_epoch_first_train, n_cycle, n_epoch_cycle , test_acc_period = 5, cuda=True, criterion = nn.CrossEntropyLoss(), _print = True, initial_lr = 1e-4):
@@ -94,8 +76,9 @@ def train(net, temp_net, train_loader, original_val, mixed_same_val, mixed_rand_
   mixed_rand_acc = []
   learning_rate = initial_lr
 
-  # First training (lr cst)
+  # In fact we go never here, but it's in case of total training in on shot.
   if n_epoch_first_train > 0 :
+    # First training (lr cst) 
     for epoch in tqdm.tqdm_notebook(range(n_epoch_first_train)):
       optimizer = torch.optim.Adam(net.parameters(),lr=learning_rate)
       make_epoch(train_loader, cuda, optimizer, net, criterion)
@@ -112,25 +95,27 @@ def train(net, temp_net, train_loader, original_val, mixed_same_val, mixed_rand_
   mixed_same_acc.append(accuracy(temp_net, mixed_same_val, cuda=cuda))
   mixed_rand_acc.append(accuracy(temp_net, mixed_rand_val, cuda=cuda))
 
+
+
   # Third training (lr cycle)
   for cycle in tqdm.tqdm_notebook(range(n_cycle)) :
-    learning_rate /= np.power(0.9,n_epoch_cycle)
+    learning_rate /= np.power(0.9,5) #constant because we fix the "amplitude of the cycles"
 
     for epoch in range(n_epoch_cycle):
       optimizer = torch.optim.Adam(net.parameters(),lr=learning_rate)
       make_epoch(train_loader, cuda, optimizer, net, criterion)
-      learning_rate *= 0.9
+      learning_rate *= np.power(0.9,5/(n_epoch_cycle-1)) #the vitess of decreasing of the learning rate depends of the number of cycle
+    learning_rate /= np.power(0.9,5/(n_epoch_cycle-1)) #We cancel the last because the learning rate evolves only n_epoch_cycle-1 times
 
+    #Polyak update of the temp_net
     polyak_update(1/(cycle+2), temp_net, net)
 
+    # Last forward to update BatchNorm layers on temp_net
+    make_epoch_no_back(train_loader, cuda, temp_net)
+    
     original_acc.append(accuracy(temp_net, original_val, cuda=cuda))
     mixed_same_acc.append(accuracy(temp_net, mixed_same_val, cuda=cuda))
     mixed_rand_acc.append(accuracy(temp_net, mixed_rand_val, cuda=cuda))
-
-
-  # Last forward for BatchNorm on temp_net
-    optimizer = torch.optim.Adam(temp_net.parameters(),lr=0)
-    make_epoch_no_back(train_loader, cuda, optimizer, temp_net)
 
   print('Finished Training')
   return original_acc, mixed_same_acc, mixed_rand_acc
@@ -140,6 +125,7 @@ def train(net, temp_net, train_loader, original_val, mixed_same_val, mixed_rand_
 
 
 def make_training(net, temp_net, n_epoch_first_train, n_cycle, n_epoch_cycle, batch_size = 16, workers = 0, criterion = nn.CrossEntropyLoss(), test_acc_period = 5, _print = True, initial_lr = 1e-4) :
+  # Creation of the datasets
   original_dataset = ImageNet9("../data/original")
   original_train = original_dataset.make_loaders(batch_size=batch_size, workers=workers, shuffle_val=True, test = False)
   original_val = original_dataset.make_loaders(batch_size=batch_size, workers=workers)
@@ -156,6 +142,7 @@ def make_training(net, temp_net, n_epoch_first_train, n_cycle, n_epoch_cycle, ba
       net.cuda()
       temp_net.cuda()
 
+  # Lauching the training
   original_acc, mixed_same_acc, mixed_rand_acc =  train(net = net, 
                                                         temp_net = temp_net,
                                                         train_loader = original_train,
@@ -172,8 +159,7 @@ def make_training(net, temp_net, n_epoch_first_train, n_cycle, n_epoch_cycle, ba
                                                         )
                                                     
  
-
-
+  # Display of the results
   print("Final original acc : ", accuracy(net, original_val, cuda=use_cuda))
   print("Final mixed_same acc : ", accuracy(net, mixed_same_val, cuda=use_cuda))
   print("Final mixed_rand acc : ", accuracy(net, mixed_rand_val, cuda=use_cuda))
@@ -187,8 +173,6 @@ def make_training(net, temp_net, n_epoch_first_train, n_cycle, n_epoch_cycle, ba
   plt.show()
 
   return original_acc, mixed_same_acc, mixed_rand_acc
-
-
 
 
 def test_on_dataset(variation, net, batch_size = 16, workers = 0) : 
